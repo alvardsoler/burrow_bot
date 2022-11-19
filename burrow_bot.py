@@ -4,9 +4,46 @@ import sys
 import time
 import mariadb
 from config import *
-import telepot
-from telepot.loop import MessageLoop
 
+import logging
+from telegram.ext.filters import Filters
+
+from telegram.ext.messagehandler import MessageHandler
+from telegram import Update
+from telegram.ext import (Updater,
+                          PicklePersistence,
+                          CommandHandler,
+                          CallbackQueryHandler,
+                          CallbackContext,
+                          ConversationHandler)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+
+# Devuelve las conexiones SSH creadas ahora
+def conexiones(update: Update, context: CallbackContext):
+    f = os.popen('who')
+    who = f.read() or 'No hay conexiones abiertas'
+    update.message.reply_text(who)
+    # bot.sendMessage(USERID, who)
+
+def temperatura(update: Update, context: CallbackContext):
+    cursor = connectDB()
+    try:
+        cursor.execute("SELECT * FROM observations ORDER BY date DESC LIMIT 1;");
+        response = ''
+        for date, temp, humidity in cursor:
+            response += f"Temperatura: {temp}ºC\nHumedad: {humidity}%\nFecha de la lectura: {date}\n"
+        update.message.reply_text(response)
+    except mariadb.Error as e:
+        print(f"Error {e}")
+    finally:
+        cursor.close()
+
+
+# Ejecuta el script info-rpi.sh que devuelve temperatura y estado de la memoria
+def infoRPI(update: Update, context: CallbackContext):
+    f = os.popen('info-rpi.sh')
+    resp = f.read() or 'Error leyendo datos'
+    update.message.reply_text(resp)
 
 # Función principal de recepciñon de mensajes, filtra para que solo me haga caso a mi
 def handle(msg):
@@ -21,64 +58,44 @@ def handle(msg):
     except Exception as e:
         print(f'Error procesando petición {e}')
 
-# Depende del content_type haremos unas cosas u otras
-def handleMessage(msg, content_type):
-    if content_type == 'text':
-        handleTextMessage(msg['text'])
-    else:
-        print(f'Recibido un content_type desconocido: {content_type}')
-        bot.sendMessage(USERID, f'Me estás mandando algo que no es un mensaje => {content_type}')
-
-# Mensajes de tipo texto
-def handleTextMessage(text):
-    if text == '/conexiones':
-        # mostramos las últimas conexiones del mes
-        conexiones()
-    elif text == '/info-rpi':
-        infoRPI()
-    elif text == '/temperatura':
-    	temperatura()
-
-# Devuelve las conexiones SSH creadas ahora
-def conexiones():
-    f = os.popen('who')
-    who = f.read() or 'No hay conexiones abiertas'
-    bot.sendMessage(USERID, who)
-
-# Ejecuta el script info-rpi.sh que devuelve temperatura y estado de la memoria
-def infoRPI():
-    f = os.popen('info-rpi.sh')
-    resp = f.read() or 'Error leyendo datos'
-    bot.sendMessage(USERID, resp)
-
-def temperatura():
+def connectDB ():
     try:
-        cursor.execute("SELECT * FROM observations ORDER BY date DESC LIMIT 1;");
-        for date, temp, humidity in cursor:
-            bot.sendMessage(USERID, f"Temperatura: {temp}ºC\nHumedad: {humidity}%\nFecha de la lectura: {date}\n")
-        return
+        conn = mariadb.connect(
+                user=DB_USER,
+                password=DB_PASSWORD,
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_SCHEMA)
+        cursor = conn.cursor()
+        return cursor
     except mariadb.Error as e:
-        print(f"Error {e}")	
+        print(f"Error connecting to MariaDB Platform: {e}")
+        sys.exit(1)
 
 
 
-try:
-    conn = mariadb.connect(
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_SCHEMA)
-    cursor = conn.cursor()
-except mariadb.Error as e:
-    print(f"Error connecting to MariaDB Platform: {e}")
-    sys.exit(1)
+if __name__ == "__main__":
+    print('Iniciando burrow_bot...')
+    pp = PicklePersistence(filename='mybot')
+    updater = Updater(token=TOKEN, persistence=pp)
 
-print('Iniciando burrow_bot...')
-bot = telepot.Bot(TOKEN)
-MessageLoop(bot, handle).run_as_thread()
-print('burrow_bot iniciado, escuchando...')
+    dispatcher = updater.dispatcher
 
-# Keep the program running.
-while 1:
-    time.sleep(10)
+    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        level=logging.INFO)
+    print('burrow_bot iniciado, escuchando...')
+
+    _handlers = {}
+
+    _handlers['conexiones'] = CommandHandler('conexiones', conexiones)
+    _handlers['temperatura'] = CommandHandler('temperatura', temperatura)
+    _handlers['info-rpi'] = CommandHandler('info-rpi', infoRPI)
+
+    # load all handlers
+    for name, _handler in _handlers.items():
+        print(f'Adding handler {name}')
+        dispatcher.add_handler(_handler)
+
+    updater.start_polling()
+
+    updater.idle()
