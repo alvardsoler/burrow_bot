@@ -1,4 +1,11 @@
 #!/usr/bin/python3
+# conexiones - Lista las conexiones SSH activas
+# info_rpi- Devuelve la temperatura de la RPI y estado memoria
+# temperatura - Devuelve la temperatura de ahora en casa
+# gastos_combustible - Devuelve los registros guardados y el gasto medio 
+# guardar_gasto_combustible - Conversación para guardar datos de gastos en la furgo
+# cancelar - Cancelar acción
+
 import os, sys, time, mariadb, logging
 from config import *
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
@@ -11,7 +18,7 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
 )
-LITERS, KMS, FULL, RESUME, CHOOSE_LAST = range(5)
+LITERS, KMS, FULL, EUROS, RESUME, CHOOSE_LAST = range(6)
 
 # no loguea al fichero de log
 
@@ -30,12 +37,12 @@ def connectDB ():
         sys.exit(1)
 
 # añadimos gastos de combustible
-def insertFuelDB (liters, kms, full, addToLast):
+def insertFuelDB (liters, kms, euros, full, addToLast):
     cursor = connectDB()
     if (addToLast): # se lo sumamos al registro anterior
-        cursor.execute("UPDATE fuel SET liters = liters + ?, km = km + ?, full = ? WHERE full = false", (liters, kms, full))
+        cursor.execute("UPDATE fuel SET liters = liters + ?, km = km + ?, euros = coalesce(euros) + coalesce(?), full = ? WHERE full = false", (liters, kms, euros, full))
     else:
-        cursor.execute("INSERT INTO fuel(date, liters, km, full) VALUES (now(), ?, ?, ?)", (liters, kms, full))
+        cursor.execute("INSERT INTO fuel(date, liters, km, euros, full) VALUES (now(), ?, ?, ?, ?)", (liters, kms, euros, full))
     cursor.close()
 
 # comprobamos si la última vez llenamos el depósito
@@ -82,10 +89,32 @@ async def temperatura(update: Update, context: CallbackContext):
         cursor.close()
 
 # Ejecuta el script info-rpi.sh que devuelve temperatura y estado de la memoria
-def infoRPI(update: Update, context: CallbackContext):
+async def infoRPI(update: Update, context: CallbackContext):
     f = os.popen('info-rpi.sh')
     resp = f.read() or 'Error leyendo datos'
     update.message.reply_text(resp)
+
+# Devuelve los gastos guardados en DB
+async def gastosCombustible(update: Update, context: CallbackContext):
+    cursor = connectDB()
+    try:
+        cursor.execute("select liters, km, format((liters / (km / 100)), 3) as 'l/100km', euros from fuel")
+        response = ''
+        for liters, km, l_km, euros in cursor:
+            response += f"|{liters} l\t|{km} km\t|{l_km} l/100km\t|{euros}\t|\n"
+        response += "|---------------------------------------------------|\n"
+        
+        cursor.execute("select format(min(liters / (km / 100)),3) as min ,format((sum(liters) / (sum(km) / 100)), 3) as 'l/100km', format(max(liters/(km/100)),3) as max, count(*) from fuel")
+        for minv, mediumv, maxv, count in cursor:
+            response += f"Min: {minv}\tMedium: {mediumv}:\tMax: {maxv}"
+
+        await update.message.reply_text(response)
+    except  mariadb.Error as e:
+        print(f"Error {e}")
+    finally:
+        cursor.close()
+        
+    
 
 ###########################
 # Handlers conversaciones #
@@ -122,17 +151,25 @@ async def set_last(update: Update, context: CallbackContext):
 # guarda los litros y pide los km
 async def set_liters(update: Update, context: CallbackContext):
     logger.info("Liters added %s", update.message.text)
-    context.user_data['liters'] = float(update.message.text)
+    context.user_data['liters'] = float(update.message.text.replace(',', '.'))
     await update.message.reply_text('Km recorridos: ')
     return KMS
 
 # guarda los km y pregunta si está lleno
 async def set_kms(update: Update, context: CallbackContext):
     logger.info(f"Added {update.message.text} kms")
-    kms = update.message.text
+    kms = update.message.text.replace(',', '.')
     context.user_data['kms'] = float(kms)
-    reply_keyboard = [["Si", "No"]]
+    await update.message.reply_text('Euros: ')
 
+    return EUROS
+
+# 
+async def set_euros(update: Update, context: CallbackContext):
+    euros = float(update.message.text.replace(',', '.'))
+    logger.info(f"Spent {euros} euros")
+    context.user_data['euros'] = euros
+    reply_keyboard = [["Si", "No"]]
     await update.message.reply_text('Has llenado el depósito?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, input_field_placeholder="Lleno?"))
 
     return FULL
@@ -153,7 +190,7 @@ async def resume(update: Update, context: CallbackContext):
 
     if (save):
         logger.info("Guardamos registro")
-        insertFuelDB(context.user_data['liters'], context.user_data['kms'], context.user_data['full'], context.user_data['add_to_last'])
+        insertFuelDB(context.user_data['liters'], context.user_data['kms'], context.user_data['euros'], context.user_data['full'], context.user_data['add_to_last'])
         if (context.user_data['kms']):
             await update.message.reply_text(f"Añadido registro con un consumo de {(context.user_data['liters'] / (context.user_data['kms']/ 100)):.3f}", reply_markup=ReplyKeyboardRemove())
     else:
@@ -162,9 +199,9 @@ async def resume(update: Update, context: CallbackContext):
     return ConversationHandler.END
 
 # cancel button handler
-def cancel(update: Update, context: CallbackContext):
+async def cancel(update: Update, context: CallbackContext):
     update.message.reply_text(
-        'Name Conversation cancelled by user. Bye. Send /set_name to start again')
+        'Conversación cancelada!')
     return ConversationHandler.END
 
 if __name__ == "__main__":
@@ -182,6 +219,7 @@ if __name__ == "__main__":
     _handlers['conexiones'] = CommandHandler('conexiones', conexiones)
     _handlers['temperatura'] = CommandHandler('temperatura', temperatura)
     _handlers['info_rpi'] = CommandHandler('info_rpi', infoRPI)
+    _handlers['gastos_combustible'] = CommandHandler('gastos_combustible', gastosCombustible)
 
     # conversational functions
     _handlers['fuel_conversation_handler'] = ConversationHandler(
@@ -190,10 +228,11 @@ if __name__ == "__main__":
             CHOOSE_LAST: [MessageHandler(filters.TEXT, set_last)],
             LITERS: [MessageHandler(filters.TEXT, set_liters)],
             KMS: [MessageHandler(filters.TEXT, set_kms)],
+            EUROS: [MessageHandler(filters.TEXT, set_euros)],
             FULL: [MessageHandler(filters.TEXT, set_full)],
             RESUME: [MessageHandler(filters.TEXT, resume)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancelar', cancel)]
     )
 
     restrict_handler = MessageHandler(~ filters.User(USERID), restrict)
