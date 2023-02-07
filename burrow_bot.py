@@ -20,8 +20,6 @@ from telegram.ext import (
 )
 LITERS, KMS, FULL, EUROS, RESUME, CHOOSE_LAST = range(6)
 
-# no loguea al fichero de log
-
 def connectDB ():
     try:
         conn = mariadb.connect(
@@ -33,7 +31,7 @@ def connectDB ():
         cursor = conn.cursor()
         return cursor
     except mariadb.Error as e:
-        print(f"Error connecting to MariaDB Platform: {e}")
+        logger.error(f"Error connecting to MariaDB Platform: {e}")
         sys.exit(1)
 
 # añadimos gastos de combustible
@@ -84,7 +82,7 @@ async def temperatura(update: Update, context: CallbackContext):
             response += f"Temperatura: {temp}ºC\nHumedad: {humidity}%\nFecha de la lectura: {date}\n"
         await update.message.reply_text(response)
     except mariadb.Error as e:
-        print(f"Error {e}")
+        logger.error(f"Error {e}")
     finally:
         cursor.close()
 
@@ -110,7 +108,7 @@ async def gastosCombustible(update: Update, context: CallbackContext):
 
         await update.message.reply_text(response)
     except  mariadb.Error as e:
-        print(f"Error {e}")
+        logger.info(f"Error {e}")
     finally:
         cursor.close()
         
@@ -240,7 +238,7 @@ if __name__ == "__main__":
 
     # load all handlers
     for name, _handler in _handlers.items():
-        print(f'Adding handler {name}')
+        logger.info(f'Adding handler {name}')
         application.add_handler(_handler)
 
     application.run_polling()
